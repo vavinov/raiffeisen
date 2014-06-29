@@ -8,6 +8,22 @@ def decimal(x):
     return Decimal(x.replace(",", ""))
 
 CAR_LOAN = "776687 LOAN REPAY VAL"
+CREDIT_CARD_ATM_TX_PREFIX = "Card ***7280 RBA ATM"
+TCSBANK = "Fin.Inst. - Merchandise"
+
+CR_CARD__GRACE_PERIOD = "CR. CARD GR PRD"
+CR_CARD__OBLIGATORY = "CR. CARD OBLIG"
+CR_CARD__INTEREST = "CR. CARD INTRST"
+CR_CARD__PRINCIPAL = "CR. CARD PRNCPL"
+CR_CARD__INSURANCE = "CR.CARD"
+
+AUTO_CATS = [
+    (lambda cat: is_supermarket_cat(cat), "Supermarket"),
+    (lambda cat: is_cinema(cat), "Cinema"),
+    (lambda cat: is_misc_cat(cat), "misc."),
+    (lambda cat: is_clothes(cat), "Clothes & Shoes"),
+    (lambda cat: cat == "Quick Payment Service", "Eating Places, Restaurants"),
+]
 
 def is_supermarket_cat(cat):
     return cat in [
@@ -16,38 +32,61 @@ def is_supermarket_cat(cat):
         "Department Stores"
     ]
 
+def is_cinema(cat):
+    return cat.startswith("Motion Picture Theatres") or cat.startswith("Theatr.") 
+
 def is_misc_cat(cat):
     return cat.startswith("RC QW") or cat in [
         "Cash Advance Fee",
-        "Quick Payment Service",
         "SMS Monthly Fee",
-        "OVERLIMIT REPAYMENT"
+        "OVERLIMIT REPAYMENT",
+        "Business Servs.not elsew.class",
+        "News Dealers & newsstands",
+        "Subscription Fee",
     ]
+
+def is_clothes(cat):
+    return cat.startswith("Misc.Apparel") or cat.startswith("Shoe Stores") or cat.startswith("Men's & Women's Clothing Store")
 
 class AccountOperation:
     def __init__(self, fields):
         self.posting_date = fields[0]
         self.value_date = fields[1]
-        self.tx_date = fields[2]
-        self.description = fields[3].strip()
-        self.tx_amount = fields[4]
-        self.delta = decimal(fields[5])
+        if len(fields) == 6:
+            self.tx_date = fields[2]
+            ndi = 3
+        else:
+            self.tx_date = ''
+            ndi = 2
+        self.description = fields[ndi + 0].strip()
+        self.tx_amount = fields[ndi + 1]
+        self.delta = decimal(fields[ndi + 2])
+
+    def prefix(self, prefix):
+        return self.description.startswith(prefix)
+
+    def is_credit_card_atm_tx(self):
+        return self.prefix(CREDIT_CARD_ATM_TX_PREFIX)
     def is_card(self):
-        return self.description.startswith("Card ***")
+        return self.prefix("Card ***")
     def is_transfer(self):
-        return self.description.startswith("P/O ")
-    def is_obligatory_repayment(self):
-        return self.description == "CR. CARD OBLIG RPMN"
+        return self.prefix("P/O ")
+    def is_credit_card_payment(self):
+        return self.prefix(CR_CARD__INTEREST) or self.prefix(CR_CARD__PRINCIPAL) or self.prefix(CR_CARD__INSURANCE)
+    def is_credit_card_misc(self):
+        return self.prefix(CR_CARD__GRACE_PERIOD) or self.prefix(CR_CARD__OBLIGATORY)
 
     def is_regular(self):
-        return not self.is_card() and not self.is_transfer() #and not self.is_obligatory_repayment()
+        return self.is_credit_card_atm_tx() or (not self.is_card() and not self.is_transfer() and not self.is_credit_card_misc())
     def classifier(self):
-        if self.description.startswith(CAR_LOAN):
-            return CAR_LOAN
-        elif self.description.startswith("CR. CARD") or self.description.startswith("CR.CARD"):
+        if self.prefix(CAR_LOAN):
+            return "CAR LOAN"
+        elif self.is_credit_card_payment():
             return "CR. CARD RPMN"
         elif is_misc_cat(self.description):
             return "misc."
+        elif self.is_credit_card_atm_tx():
+            return "ATM"
         else:
             return self.description
     def get_delta(self):
@@ -78,10 +117,12 @@ class CardOperation:
         else:
             id = self.merchant_type
 
-        if is_supermarket_cat(id):
-            return "Supermarket"
-        elif is_misc_cat(id):
-            return "misc."
+        for (predicate, name) in AUTO_CATS:
+            if predicate(id):
+                return name
+
+        if id.startswith(TCSBANK):
+            return "TCS bank"
         else:
             return id
 
@@ -112,11 +153,23 @@ for o in account_operations + card_operations:
             #print "ignoring", o.__dict__
             pass
 
+if type_deltas.has_key('ATM') and type_deltas['ATM'] <= -38000:
+    type_deltas['ATM'] += 34000
+    type_deltas['Rent'] = -34000
+    type_deltas['Car parking'] = -4000
+
 def second(x):
     return x[1]
 
+PRIORITY_CATS = set(["Rent", "Car parking", "CAR LOAN", "CR. CARD RPMN", "Service Stations"])
+
 FORMAT="%-40s: %10.2f"
 SUM_FORMAT="%-62s%10.2f"
+def print_summary_priority(type_deltas):
+    psum = print_summary(filter(lambda (k, v): k in PRIORITY_CATS, type_deltas))
+    npsum = print_summary(filter(lambda (k, v): k not in PRIORITY_CATS, type_deltas))
+    return psum + npsum
+
 def print_summary(type_deltas):
     sum = 0
     for (k, v) in sorted(type_deltas, key=second):
@@ -125,8 +178,8 @@ def print_summary(type_deltas):
     print SUM_FORMAT % ("", sum)
     return sum
    
-income = print_summary((ty, de) for (ty, de) in type_deltas.items() if de >= 0)
+income = print_summary([(ty, de) for (ty, de) in type_deltas.items() if de >= 0])
 print
-expense = print_summary((ty, de) for (ty, de) in type_deltas.items() if de < 0)
+expense = print_summary_priority([(ty, de) for (ty, de) in type_deltas.items() if de < 0])
 print
 print SUM_FORMAT % ("", income + expense)
